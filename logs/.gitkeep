@@ -1,5 +1,0 @@
-# Logs directory
-
-Application logs are written here at runtime (for example `app.log`).
-Log files are ignored by Git; this placeholder keeps the folder in the
-repository so the logging setup works on a fresh clone.

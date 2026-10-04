@@ -1,6 +1,6 @@
 # Study Sprint
 
-A Streamlit education app for grade-aware multiple-choice exams, timed student sessions, local result storage, and parent review.
+A Streamlit practice app with subject, unit, topic, and level-based questions, timed exams, saved results, and parent review.
 
 ## Run locally
 
@@ -11,7 +11,7 @@ pip install -r requirements.txt
 streamlit run learning-home.py
 ```
 
-The app uses SQLite in `education_app.db`, created automatically on first run. The first screen is the **Parent Login / Sign-Up** page; after signing in you can start exams, review **Student Results** and edit the **Parent Profile** from the in-app buttons.
+The app connects to the configured Turso database and does not fall back to either local SQLite file. Set `STUDY_SPRINT_DATABASE_URL` to its credentialed URL; a legacy `DATABASE_URL` is accepted only when it points to the configured Turso host. The first screen is the **Parent Login / Sign-Up** page; after signing in you can start exams, review **Student Results** and edit the **Parent Profile** from the in-app buttons.
 
 The database schema is created automatically on first launch (new tables and
 columns are added in place on older databases). It includes:
@@ -31,7 +31,7 @@ columns are added in place on older databases). It includes:
 | `pages/student-results.py` | Student Results page (student selector, filters, answer review, delete) |
 | `pages/parent-profile.py` | Parent Profile — view/edit the parent details and add/remove/edit children |
 | `app_settings.py` | Reads configuration from Streamlit secrets first, then the environment |
-| `backend/services/llm_backend.py` | Config loading, subject/topic resolution, provider routing, question generation |
+| `backend/services/llm_backend.py` | Config and curriculum loading, provider routing, question generation |
 | `backend/services/storage.py` | Database layer with support for SQLite, Turso (libsql), and PostgreSQL |
 | `backend/services/auth_storage.py` | Parent/student account persistence and exam linking |
 | `backend/services/email_service.py` | Outbound email (exam reports, OTP reset codes) |
@@ -40,7 +40,7 @@ columns are added in place on older databases). It includes:
 | `ui/components/theme.py` | Light/Dark CSS for the workspace and parent pages |
 | `ui/components/appearance.py` | Shared Light/Dark appearance toggle |
 | `middleware/` | Parent authentication / session middleware |
-| `config/` | `config.json`, `locations.json`, `topics.json`, `models.json` |
+| `config/` | `config.json`, `curriculum.json`, `models.json` |
 | `tests/` | Pytest unit and integration test suites |
 | `logs/` | Runtime log output (`app.log`); contents are git-ignored |
 | `requirements.txt` | Runtime dependencies installed by Streamlit Community Cloud |
@@ -95,54 +95,26 @@ Points to keep in mind once deployed:
 
 ### Data persistence on Community Cloud
 
-`education_app.db` is written inside the app container. Community Cloud hibernates an app after 12 hours without traffic and rebuilds the container when you reboot or redeploy it, so saved results live only for the current container lifetime — they are **not** a permanent archive.
+The app uses the hosted Turso database `my-learning-apecet`; local SQLite files are not used. On startup, it creates any missing app tables in that database.
 
-**Recommended: Use Turso (SQLite Flash) for persistent storage**
+### Connect to the configured Turso database
 
-Turso provides a free, managed SQLite database with cloud persistence and edge caching. To set it up:
-
-1. Create a free account at [https://app.turso.tech/](https://app.turso.tech/)
-2. Create a new database and get your database URL
-3. Add `DATABASE_URL` to your Streamlit secrets with format:
-   ```toml
-   DATABASE_URL = "libsql://your-auth-token@your-db.turso.io/your-db-name"
-   ```
-4. The app will automatically use Turso instead of the local SQLite file
-
-Alternatively, you can use PostgreSQL (Neon, Supabase, etc.) by setting `DATABASE_URL` to a PostgreSQL connection string. Use the local install when the results history must be kept long term, or move storage to an external database before treating the hosted app as the system of record.
-
-## Turso Database Setup (Recommended for Production)
-
-Turso (SQLite Flash) is a free, managed SQLite database that provides cloud persistence and edge caching. It's the recommended option for production deployments.
-
-### Setting up Turso
-
-1. **Create a Turso account** at [https://app.turso.tech/](https://app.turso.tech/)
-2. **Create a database**:
-   - Click "Create Database" 
-   - Choose a name (e.g., `study-sprint`)
-   - Select a region closest to your users
-3. **Get your database URL**:
-   - Navigate to your database
-   - Click "Get Started" or "Connection URL"
-   - Copy the database URL in format: `libsql://your-auth-token@your-db.turso.io/your-db-name`
-
-### Configure the app to use Turso
+In Turso, open the `my-learning-apecet` database, create or rotate its authentication token, and use the tokenized URL below.
 
 **For Streamlit Community Cloud:**
 - Add to the app's **Advanced settings → Secrets** box:
   ```toml
-  DATABASE_URL = "libsql://your-auth-token@your-db.turso.io/your-db-name"
+   STUDY_SPRINT_DATABASE_URL = "libsql://<database-auth-token>@my-learning-apecet-pzazz55.aws-us-east-1.turso.io"
   ```
 
 **For local development:**
 - Add to your `.env` file:
   ```env
-  DATABASE_URL=libsql://your-auth-token@your-db.turso.io/your-db-name
+   STUDY_SPRINT_DATABASE_URL=libsql://<database-auth-token>@my-learning-apecet-pzazz55.aws-us-east-1.turso.io
   ```
 - Or save as `.streamlit/secrets.toml` (excluded from Git)
 
-The app will automatically detect the Turso URL and use it instead of the local SQLite file.
+The app rejects URLs for any other host instead of silently switching databases. Never commit the token.
 
 ### Turso Benefits
 
@@ -181,12 +153,13 @@ The `logs/` directory is created automatically and its contents are git-ignored.
 
 ## Configuration directory (`config/`)
 
-All application settings, location hierarchies, topics, and model provider configurations are organized in the `config/` folder:
+- **`config/curriculum.json`** defines the available subjects, their units, and each unit's topics. Selecting a subject loads its units; selecting a unit loads its topics. Keep the JSON shape as `subject -> unit -> [topics]`.
+- **`config/config.json`** sets the display timezone and optional setup defaults.
+- **`config/models.json`** controls the available LLM providers and API key environment variable mappings.
 
-- **`config/config.json`**: Timezone and initial setup page defaults.
-- **`config/locations.json`**: Country, State, and School District hierarchy.
-- **`config/models.json`**: Supported LLM model providers and API key environment variable mappings.
-- **`config/topics.json`**: School-specific topic overrides and default grade/subject topics.
+Question generation sends the selected subject, unit, topic, and level (`Simple`, `Medium`, or `Complex`) to the selected LLM. The exam and question-set records retain the selected metadata; database migrations add the new fields to existing databases. Student registration only requires a name. Legacy grade/location columns remain in the database for compatibility but are no longer part of the app workflow.
+
+The full practice test contains 200 questions over 3 hours: Mathematics (50), Physics (50), and Mechanical Engineering (100). It distributes each section across topics configured for that subject.
 
 ## Model configuration
 
@@ -194,94 +167,13 @@ Edit `config/models.json` to control which providers appear in the sidebar. Each
 
 The selected model is routed through the matching provider automatically. An exam cannot start unless the selected model's configured API key is available.
 
-## Location configuration
-
-`config/locations.json` drives the **Country**, **State**, and **School District** dropdowns on the setup page using a hierarchical structure:
-
-```json
-{
-  "United States": {
-    "North Carolina": [
-      "Charlotte-Mecklenburg Schools",
-      "Wake County Public School System"
-    ]
-  },
-  "Canada": {
-    "Ontario": ["Toronto District School Board", "Peel District School Board"]
-  },
-  "Other": {}
-}
-```
-
-- **Countries**: Top-level keys define the available countries in the dropdown.
-- **States / Provinces**: Selecting a country dynamically populates the State dropdown with its associated states.
-- **School Districts**: Selecting a state dynamically populates the School District dropdown with its associated school districts.
-- **Countries without states**: If a country has no states configured (e.g. `"Other": {}`), the State and District fields are hidden automatically.
-
-## Subject and topic configuration
-
-`config/topics.json` drives the **Subject** and **Topic** dropdowns and the Parent Results filters. It is organized into school-specific overrides and explicit defaults:
-
-```json
-{
-  "schools": {
-    "Charlotte-Mecklenburg Schools": {
-      "Grade 3": { "Maths": ["Place Value to 10,000", "Perimeter & Area"] }
-    }
-  },
-  "default": {
-    "Grade 1": { "Maths": ["Counting & Writing Numbers", "Addition within 20"] },
-    "Grade 2": { "Maths": ["Place Value to 1000", "Telling Time"] },
-    "General Knowledge": ["Geography", "History", "Current Affairs"],
-    "Others": []
-  }
-}
-```
-
-Topics are resolved most-specific-first from the School → Grade → Subject selection:
-
-1. `schools` → the chosen **School District** (e.g. `Charlotte-Mecklenburg Schools`) → `"Grade N"` → subject
-2. `default` → `"Grade N"` → subject (used when a grade/subject is not defined in the school, or for schools outside the configured districts)
-3. `default` → subject (used by subjects such as **General Knowledge** that do not vary by grade)
-
-- The order of keys and topics in the file is the order shown in the app.
-- A subject with no matching list (for example `Others`, which is deliberately empty) falls back to a free-text **Topic** box, so custom subjects keep working.
-- When values are missing in `"Charlotte-Mecklenburg Schools"`, the app automatically falls back to `default`.
-- Schools outside `"Charlotte-Mecklenburg Schools"` automatically take `default` values.
-- A missing `config/topics.json` leaves the built-in subject list with free-text topics, while an unknown section name raises a clear error instead of being silently ignored.
-
-Because the Topic list depends on the school and the grade, **School District** and **Grade** are placed above **Subject** and **Topic** on the setup page.
-
-The selected topic is saved with the exam, focuses the generated questions, and is used to revisit the student's earlier mistakes in that same topic.
-
 ## Application configuration
 
-`config/config.json` sets the display timezone and the starting value of every field on the setup page:
+Optional `defaults` in `config/config.json` can set `subject`, `unit`, `topic`, `level`, `question_count`, `time_limit`, `practice_mode`, and `appearance`. The standard practice limit is configurable up to 180 minutes; the full practice test always uses 3 hours.
 
-```json
-{
-  "timezone": "America/New_York",
-  "timezone_label": "Eastern Time",
-  "defaults": {
-    "country": "United States",
-    "state": "North Carolina",
-    "school_district": "Charlotte-Mecklenburg Schools",
-    "grade": "Grade 1",
-    "subject": "Maths",
-    "topic": "",
-    "question_count": 5,
-    "time_limit": 10,
-    "include_images": false,
-    "practice_mode": false,
-    "appearance": "Dark"
-  }
-}
-```
-
-- `timezone` accepts any IANA name, for example `America/New_York` (EST/EDT), `Europe/London` (GMT/BST) or `Asia/Kolkata` (IST). The clock in every student screen header and the `Completed` timestamps in Parent Results are shown in this zone, and the zone abbreviation follows that region's own daylight saving rules.
+- `timezone` accepts any IANA name, for example `America/New_York`, `Europe/London` or `Asia/Kolkata`. The clock and completed timestamps use this zone.
 - `timezone_label` is the caption shown under the clock.
-- `defaults` pre-selects the Country, State, School District, Grade, Subject, Topic, question count, time limit, both toggles and the appearance theme. `"topic": ""` means the first topic in the resolved list, and `time_limit` is clamped to 1–180 minutes.
-- Anything unusable never breaks the app: unknown keys, an unknown timezone or a wrong value type are reported as a warning in the sidebar and the built-in default is used instead.
+- Invalid timezone settings are reported as warnings and fall back to the built-in timezone.
 - `tzdata` supplies the IANA database on Windows and is listed in both `requirements.txt` and `pyproject.toml`.
 
 ## Parent results login
@@ -292,6 +184,6 @@ Sign in supports both manual credential accounts and Google OAuth, plus an email
 
 Authenticated parents can delete saved tests after confirming the deletion.
 
-Each saved test expands into a metric row (grade, score, correct, wrong, question count and overall time) plus an answer review table. The review table lists every question with its `A)`–`D)` options next to the student's answer, the correct answer, the time taken and the status, so a parent can see exactly what was asked.
+Each saved test expands into a metric row (score, correct, wrong, question count and overall time) plus an answer review table. The review table lists every question with its `A)`–`D)` options next to the student's answer, the correct answer, the time taken and the status.
 
-The filter row covers student name, grade, subject and topic. The topic choices come from the saved results that match the other three filters, so a topic filter can never select something with no results.
+Results can be filtered by subject, unit, topic, and level. Full practice test results keep per-question subject and topic details so they can be found through those filters.

@@ -1,36 +1,22 @@
-"""Data storage for Study Sprint.
+"""Database layer for Study Sprint.
 
-Three backends are supported and the choice is automatic:
-
-* **No ``DATABASE_URL`` configured** — a local SQLite file (``education_app.db``).
-  This is the development default and keeps every existing script working.
-* **``DATABASE_URL`` configured with libsql://** — Turso (SQLite Flash) database.
-  The URL is read from the environment or from Streamlit secrets. Turso provides
-  a managed SQLite database with cloud persistence and edge caching.
-* **``DATABASE_URL`` configured with postgresql://** — that hosted database is used instead. The
-  URL is read from the environment or from Streamlit secrets, so a Neon,
-  Supabase, CockroachDB, Aiven or Railway PostgreSQL database can be attached
-  without a code change.
-
-Streamlit Community Cloud does not guarantee the persistence of local file
-storage, so ``education_app.db`` inside a deployed container can disappear at any
-time. Point ``DATABASE_URL`` at a hosted Turso or PostgreSQL database to keep saved
-results across hibernations and redeploys.
-
-All SQL in this app is written once, with named bind parameters (``:name``), and
-runs on all backends; SQLAlchemy's ``Table`` metadata generates the correct
-primary-key definition (``AUTOINCREMENT`` versus ``IDENTITY``) for each dialect.
+The application uses the configured Turso database for persistent results and
+parent/student records. The storage layer keeps the SQL portable across the
+supported database engines while guarding the required schema upgrades.
 """
 
 from __future__ import annotations
 
 import json
+import base64
 import threading
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 import requests
+from dotenv import dotenv_values
 
+from backend.services.logging_config import get_logger
 from sqlalchemy import (
     Column,
     Engine,
@@ -54,8 +40,9 @@ try:
 except ImportError:
     TURSO_AVAILABLE = False
 
-DEFAULT_SQLITE_PATH = BASE_DIR / "education_app.db"
-DEFAULT_DATABASE_URL = f"sqlite:///{DEFAULT_SQLITE_PATH.as_posix()}"
+DEFAULT_SQLITE_PATH = BASE_DIR / "study_sprint.db"
+TURSO_DATABASE_HOST = "my-learning-apecet-pzazz55.aws-us-east-1.turso.io"
+DEFAULT_DATABASE_URL = f"libsql://{TURSO_DATABASE_HOST}"
 
 metadata = MetaData()
 
@@ -78,7 +65,9 @@ exams = Table(
     Column("school_state", Text, nullable=False, server_default=""),
     Column("school_district", Text, nullable=False, server_default=""),
     Column("topic", Text, nullable=False, server_default=""),
-        Column("question_set_id", Integer),
+    Column("unit", Text, nullable=False, server_default=""),
+    Column("level", Text, nullable=False, server_default=""),
+    Column("question_set_id", Integer),
     Column("student_id", Text, nullable=True),  # Public student id (e.g. "STU-001")
     Column("parent_id", Integer, nullable=True),   # New column for parent reference
 )
@@ -91,6 +80,8 @@ question_sets = Table(
     Column("grade", Text, nullable=False),
     Column("subject", Text, nullable=False),
     Column("topic", Text, nullable=False),
+    Column("unit", Text, nullable=False, server_default=""),
+    Column("level", Text, nullable=False, server_default=""),
     Column("questions_json", Text, nullable=False),
     Column("created_at", Text, nullable=False),
 )
@@ -155,19 +146,40 @@ EXAM_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("school_district", "TEXT NOT NULL DEFAULT ''"),
     ("school_state", "TEXT NOT NULL DEFAULT ''"),
     ("topic", "TEXT NOT NULL DEFAULT ''"),
-        ("question_set_id", "INTEGER"),
+    ("unit", "TEXT NOT NULL DEFAULT ''"),
+    ("level", "TEXT NOT NULL DEFAULT ''"),
+    ("question_set_id", "INTEGER"),
     ("student_id", "TEXT"),
     ("parent_id", "INTEGER"),
+)
+QUESTION_SET_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("unit", "TEXT NOT NULL DEFAULT ''"),
+    ("level", "TEXT NOT NULL DEFAULT ''"),
 )
 
 _lock = threading.RLock()
 _engine: Engine | None = None
 _schema_ready = False
+logger = get_logger(__name__)
 
 
 def database_url() -> str:
-    """The configured database URL, or the local SQLite file when none is set."""
-    return (read_setting("DATABASE_URL") or "").strip() or DEFAULT_DATABASE_URL
+    """Return only the configured Study Sprint Turso database URL."""
+    configured = (read_setting("STUDY_SPRINT_DATABASE_URL") or "").strip()
+    if configured:
+        if urlsplit(configured).hostname != TURSO_DATABASE_HOST:
+            raise RuntimeError(f"STUDY_SPRINT_DATABASE_URL must target {TURSO_DATABASE_HOST}.")
+        return configured
+
+    fallback_settings = (
+        read_setting("DATABASE_URL"),
+        dotenv_values(BASE_DIR / ".env").get("DATABASE_URL"),
+    )
+    for fallback_setting in fallback_settings:
+        fallback_setting = (fallback_setting or "").strip()
+        if fallback_setting and urlsplit(fallback_setting).hostname == TURSO_DATABASE_HOST:
+            return fallback_setting
+    return DEFAULT_DATABASE_URL
 
 
 def _normalized_url(url: str) -> str:
@@ -219,62 +231,81 @@ def _get_turso_http_client() -> tuple[str, str]:
     """Return Turso HTTP endpoint and auth token for direct HTTP requests."""
     url = database_url()
     if not url.startswith("libsql://"):
-        raise RuntimeError(f"DATABASE_URL must start with libsql:// for Turso, got: {url}")
+        raise RuntimeError(f"STUDY_SPRINT_DATABASE_URL must start with libsql:// for Turso, got: {url}")
     
     parsed = urlsplit(url)
     
-    # Extract auth token from URL
-    auth_token = parsed.username or ""
+    auth_token = parsed.username or read_setting("STUDY_SPRINT_DATABASE_AUTH_TOKEN") or ""
+    if not auth_token:
+        raise RuntimeError(
+            "Missing Turso auth token. Set STUDY_SPRINT_DATABASE_URL with its token "
+            "or configure STUDY_SPRINT_DATABASE_AUTH_TOKEN."
+        )
     
-    # Convert libsql:// to https:// for HTTP requests
-    # Format: https://hostname/path
-    http_url = f"https://{parsed.hostname}{parsed.path}"
+    http_url = f"https://{parsed.hostname}/v2/pipeline"
     
     return http_url, auth_token
 
 
 def _turso_execute(sql: str, params: list[Any] | None = None) -> Any:
     """Execute SQL query using Turso HTTP API."""
-    http_url, auth_token = _get_turso_http_client()
-    
-    headers = {
-        "Authorization": f"Bearer {auth_token}",
-        "Content-Type": "application/json"
-    }
-    
-    # Use parameters directly if provided
-    sql_str = sql
-    param_list = params if params else []
-    
-    payload = {
-        "statements": [
-            {
-                "q": sql_str,
-                "params": param_list
-            }
-        ]
-    }
-    
-    response = requests.post(http_url, headers=headers, json=payload, timeout=30)
-    response.raise_for_status()
-    
-    result = response.json()
-    
-    # Handle different response formats from Turso
-    if isinstance(result, list):
-        # Turso returns a list of statement results
-        if len(result) > 0 and result[0].get("error"):
-                        raise RuntimeError(f"Turso query error: {result[0]['error']}")
-        # Extract the actual results from the first statement
-        if len(result) > 0 and result[0].get("results"):
-            return {"results": [result[0]["results"]]}
-        return {"results": result}
-    elif isinstance(result, dict):
-        if result.get("results") and result["results"][0].get("error"):
-            raise RuntimeError(f"Turso query error: {result['results'][0]['error']}")
-        return result
-    
-    return result
+    return _turso_execute_statements([{"q": sql, "params": params or []}])
+
+
+def _encode_turso_value(value: Any) -> dict[str, str]:
+    """Encode a Python bind value using Turso's typed HTTP protocol."""
+    if value is None:
+        return {"type": "null"}
+    if isinstance(value, bool):
+        return {"type": "integer", "value": "1" if value else "0"}
+    if isinstance(value, int):
+        return {"type": "integer", "value": str(value)}
+    if isinstance(value, float):
+        return {"type": "float", "value": repr(value)}
+    if isinstance(value, bytes):
+        return {"type": "blob", "base64": base64.b64encode(value).decode("ascii")}
+    return {"type": "text", "value": str(value)}
+
+
+def _decode_turso_value(value: Any) -> Any:
+    """Convert a Turso typed value to a native Python value."""
+    if not isinstance(value, dict) or "type" not in value:
+        return value
+    value_type = value["type"]
+    raw_value = value.get("value")
+    if value_type == "null":
+        return None
+    if value_type == "integer":
+        return int(raw_value)
+    if value_type == "float":
+        return float(raw_value)
+    if value_type == "blob":
+        return base64.b64decode(value.get("base64", ""))
+    return raw_value
+
+
+def _normalize_turso_response(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize pipeline responses for the existing storage query helpers."""
+    normalized_results = []
+    for entry in payload.get("results", []):
+        if entry.get("type") == "error":
+            raise RuntimeError(f"Turso query error: {entry.get('error', 'unknown error')}")
+        response = entry.get("response", {})
+        if response.get("type") == "error":
+            raise RuntimeError(f"Turso query error: {response.get('error', 'unknown error')}")
+        if response.get("type") != "execute":
+            continue
+        result = response.get("result", {})
+        normalized_results.append({
+            "columns": [column.get("name", "") for column in result.get("cols", [])],
+            "rows": [
+                [_decode_turso_value(value) for value in row]
+                for row in result.get("rows", [])
+            ],
+            "affected_row_count": result.get("affected_row_count", 0),
+            "last_insert_rowid": result.get("last_insert_rowid"),
+        })
+    return {"results": normalized_results}
 
 
 def _turso_execute_statements(statements: list[dict[str, Any]]) -> Any:
@@ -286,26 +317,35 @@ def _turso_execute_statements(statements: list[dict[str, Any]]) -> Any:
     calls; this helper keeps multi-statement work in one round-trip.
     """
     http_url, auth_token = _get_turso_http_client()
+    requests_body = []
+    for statement in statements:
+        sql = statement.get("q", statement.get("sql", ""))
+        values = statement.get("params", statement.get("args", [])) or []
+        requests_body.append({
+            "type": "execute",
+            "stmt": {"sql": sql, "args": [_encode_turso_value(value) for value in values]},
+        })
+    requests_body.append({"type": "close"})
 
-    headers = {
-        "Authorization": f"Bearer {auth_token}",
-        "Content-Type": "application/json",
-    }
-
-    response = requests.post(http_url, headers=headers, json={"statements": statements}, timeout=30)
-    response.raise_for_status()
-
-    result = response.json()
-
-    # Normalise the various Turso response shapes to {"results": [...]}.
-    if isinstance(result, list):
-        for entry in result:
-            if isinstance(entry, dict) and entry.get("error"):
-                raise RuntimeError(f"Turso query error: {entry['error']}")
-        return {"results": result}
-    if isinstance(result, dict):
-        return result
-    return result
+    response = requests.post(
+        http_url,
+        headers={
+            "Authorization": f"Bearer {auth_token}",
+            "Content-Type": "application/json",
+        },
+        json={"requests": requests_body},
+        timeout=30,
+    )
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as error:
+        if response.status_code == 401:
+            raise RuntimeError(
+                "Turso rejected the auth token for my-learning-apecet. Create a database auth token "
+                "for this database and update STUDY_SPRINT_DATABASE_URL."
+            ) from error
+        raise
+    return _normalize_turso_response(response.json())
 
 
 def _extract_turso_scalar(result: Any) -> int | None:
@@ -374,10 +414,8 @@ def _upgrade_exam_columns(engine: Engine | None = None) -> None:
                 if name in existing:
                     continue
                 _turso_execute(f"ALTER TABLE exams ADD COLUMN {name} {definition}")
-        except Exception as e:
-            # If upgrade fails, we'll try again on next run
-            print(f"Turso column upgrade failed: {e}")
-            pass
+        except Exception as error:
+            logger.warning("Turso column upgrade failed: %s", error)
         return
     
     if engine is None:
@@ -392,6 +430,29 @@ def _upgrade_exam_columns(engine: Engine | None = None) -> None:
             continue
         with engine.begin() as connection:
             connection.execute(text(f"ALTER TABLE exams ADD COLUMN {name} {definition}"))
+
+
+def _upgrade_question_set_columns(engine: Engine | None = None) -> None:
+    """Add practice metadata to question_sets created by an older release."""
+    if is_turso():
+        result = _turso_execute("PRAGMA table_info(question_sets)")
+        existing = {
+            row[1]
+            for row in result.get("results", [{}])[0].get("rows", [])
+            if len(row) > 1
+        }
+        for name, definition in QUESTION_SET_COLUMN_MIGRATIONS:
+            if name not in existing:
+                _turso_execute(f"ALTER TABLE question_sets ADD COLUMN {name} {definition}")
+        return
+
+    if engine is None or not inspect(engine).has_table("question_sets"):
+        return
+    existing = {column["name"] for column in inspect(engine).get_columns("question_sets")}
+    for name, definition in QUESTION_SET_COLUMN_MIGRATIONS:
+        if name not in existing:
+            with engine.begin() as connection:
+                connection.execute(text(f"ALTER TABLE question_sets ADD COLUMN {name} {definition}"))
 
 
 def ensure_schema() -> None:
@@ -424,7 +485,9 @@ def ensure_schema() -> None:
                     school_state TEXT NOT NULL DEFAULT '',
                     school_district TEXT NOT NULL DEFAULT '',
                     topic TEXT NOT NULL DEFAULT '',
-                                        question_set_id INTEGER,
+                    unit TEXT NOT NULL DEFAULT '',
+                    level TEXT NOT NULL DEFAULT '',
+                    question_set_id INTEGER,
                     student_id TEXT,
                     parent_id INTEGER
                 )
@@ -437,6 +500,8 @@ def ensure_schema() -> None:
                     grade TEXT NOT NULL,
                     subject TEXT NOT NULL,
                     topic TEXT NOT NULL,
+                    unit TEXT NOT NULL DEFAULT '',
+                    level TEXT NOT NULL DEFAULT '',
                     questions_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 )
@@ -499,10 +564,12 @@ def ensure_schema() -> None:
             """)
             
             _upgrade_exam_columns(None)  # Pass None since we're using HTTP client directly
+            _upgrade_question_set_columns(None)
         else:
             engine = get_engine()
             metadata.create_all(engine)
             _upgrade_exam_columns(engine)
+            _upgrade_question_set_columns(engine)
             
             # Create indexes for new tables
             with engine.begin() as connection:

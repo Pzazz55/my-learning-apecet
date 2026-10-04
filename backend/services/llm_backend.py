@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -23,22 +22,18 @@ def _resolve_config_path(filename: str) -> Path:
 
 
 MODELS_PATH = _resolve_config_path("models.json")
-TOPICS_PATH = _resolve_config_path("topics.json")
+CURRICULUM_PATH = _resolve_config_path("curriculum.json")
 CONFIG_PATH = _resolve_config_path("config.json")
-LOCATIONS_PATH = _resolve_config_path("locations.json")
 DEFAULT_CONFIG: dict[str, Any] = {
     "timezone": "America/New_York",
     "timezone_label": "Eastern Time",
     "defaults": {
-        "country": "United States",
-        "state": "North Carolina",
-        "school_district": "Charlotte-Mecklenburg Schools",
-        "grade": "Grade 1",
-        "subject": "Maths",
+        "subject": "Mathematics",
+        "unit": "Matrices & Determinants",
         "topic": "",
+        "level": "Medium",
         "question_count": 5,
         "time_limit": 10,
-        "include_images": False,
         "practice_mode": False,
         "appearance": "Dark",
     },
@@ -46,13 +41,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 
 def load_models() -> list[dict[str, Any]]:
-    """Return every model listed in models.json (filtered only by ``enabled``).
-
-    API-key availability is intentionally *not* used to hide models here: the
-    sidebar lists all configured providers, and a model whose key is missing is
-    flagged in the UI instead of silently disappearing. ``model_key_available``
-    reports key presence for that labelling and for the pre-flight check.
-    """
+    """Return every model listed in models.json (filtered only by ``enabled``)."""
     path = _resolve_config_path("models.json")
     with path.open(encoding="utf-8") as file:
         models = json.load(file)
@@ -65,288 +54,35 @@ def model_key_available(model: dict[str, Any]) -> bool:
     return bool(key_name) and bool(read_setting(key_name))
 
 
-DEFAULT_LOCATIONS: dict[str, dict[str, list[str]]] = {
-    "United States": {
-        "North Carolina": ["Charlotte-Mecklenburg Schools", "Wake County Public School System"],
-        "California": ["Los Angeles Unified School District", "San Diego Unified School District"],
-    },
-    "Canada": {},
-    "United Kingdom": {},
-    "Australia": {},
-    "India": {},
-    "Other": {},
-}
+def load_curriculum() -> dict[str, dict[str, list[str]]]:
+    """Load the Subject -> Unit -> Topics catalog used by question generation."""
+    with CURRICULUM_PATH.open(encoding="utf-8") as file:
+        configured = json.load(file)
+    if not isinstance(configured, dict) or not configured:
+        raise ValueError("curriculum.json must contain at least one subject.")
+
+    curriculum: dict[str, dict[str, list[str]]] = {}
+    for subject, units in configured.items():
+        if not isinstance(subject, str) or not isinstance(units, dict) or not units:
+            raise ValueError("Each curriculum subject must contain a unit object.")
+        curriculum[subject] = {}
+        for unit, topics in units.items():
+            if not isinstance(unit, str) or not isinstance(topics, list) or not topics:
+                raise ValueError("Each curriculum unit must contain a list of topics.")
+            curriculum[subject][unit] = [str(topic) for topic in topics]
+    return curriculum
 
 
-def load_locations() -> dict[str, dict[str, list[str]]]:
-    """Return the Country -> State -> [School Districts] mapping configured in locations.json."""
-    try:
-        path = _resolve_config_path("locations.json")
-        with path.open(encoding="utf-8") as file:
-            configured = json.load(file)
-    except FileNotFoundError:
-        return DEFAULT_LOCATIONS
-
-    if not isinstance(configured, dict):
-        return DEFAULT_LOCATIONS
-
-    locations: dict[str, dict[str, list[str]]] = {}
-    for country, states in configured.items():
-        if not isinstance(country, str) or not isinstance(states, dict):
-            continue
-        cleaned_states: dict[str, list[str]] = {}
-        for state, districts in states.items():
-            if not isinstance(state, str):
-                continue
-            if isinstance(districts, list):
-                cleaned_states[state] = [str(d) for d in districts if isinstance(d, (str, int))]
-            else:
-                cleaned_states[state] = []
-        locations[country] = cleaned_states
-
-    return locations or DEFAULT_LOCATIONS
+def resolve_units(curriculum: dict[str, Any], subject: str) -> list[str]:
+    """Return the configured units for a subject."""
+    units = curriculum.get(subject, {})
+    return list(units) if isinstance(units, dict) else []
 
 
-def load_grades(topics_catalog: dict[str, Any] | None = None, config: dict[str, Any] | None = None) -> list[str]:
-    """Return available grade options derived from topics.json or config.json."""
-    if config and isinstance(config.get("grades"), list) and config["grades"]:
-        return [str(g) for g in config["grades"]]
-
-    grades_dict = (topics_catalog.get("grades") if topics_catalog else None) or {}
-    if isinstance(grades_dict, dict) and grades_dict:
-        def sort_key(label: str) -> tuple[int, str]:
-            match = re.search(r"\d+", label)
-            return (int(match.group()), label) if match else (0, label)
-
-        return sorted(grades_dict.keys(), key=sort_key)
-
-    return [f"Grade {number}" for number in range(1, 13)]
-
-
-DEFAULT_SUBJECTS = ["Maths", "English", "Science", "General Knowledge", "Others"]
-
-
-TOPIC_SECTIONS = ("schools", "default", "subjects", "grades")
-
-
-def _require_mapping(section: str, value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError(f"topics.json '{section}' must be a JSON object.")
-    return value
-
-
-def load_topics() -> dict[str, Any]:
-    """Return the topic catalog configured in topics.json.
-
-    The file has two main sections:
-        "schools": school district -> "Grade N" -> subject -> specific topic overrides
-                   (e.g. "Charlotte-Mecklenburg Schools")
-        "default": fallback values when a school/grade/subject has no specific entry,
-                   or for schools outside configured districts:
-                   "grades" -> "Grade N" -> subject -> topics
-                   "subjects" -> subject -> topics (general/grade-independent fallback)
-
-    Legacy sections ("grades", "subjects" at top level) are also supported for backward compatibility.
-    A missing topics.json leaves the built-in subjects with free-text topics.
-    """
-    empty_catalog: dict[str, Any] = {
-        "schools": {},
-        "default": {},
-        "grades": {},
-        "subjects": {subject: [] for subject in DEFAULT_SUBJECTS},
-    }
-    try:
-        path = _resolve_config_path("topics.json")
-        with path.open(encoding="utf-8") as file:
-            configured = json.load(file)
-    except FileNotFoundError:
-        return empty_catalog
-    if not isinstance(configured, dict):
-        raise ValueError("topics.json must contain a JSON object with 'schools' and 'default' sections.")
-    unknown = sorted(set(configured) - set(TOPIC_SECTIONS))
-    if unknown:
-        raise ValueError(f"topics.json has unknown section(s): {', '.join(unknown)}. Use 'schools' and 'default'.")
-
-    catalog: dict[str, Any] = {
-        "schools": {},
-        "default": {},
-        "grades": {},
-        "subjects": {},
-    }
-
-    if "schools" in configured:
-        catalog["schools"] = _require_mapping("schools", configured["schools"])
-
-    if "default" in configured:
-        catalog["default"] = _require_mapping("default", configured["default"])
-
-    default_obj = catalog["default"]
-    grades_dict: dict[str, Any] = {}
-    if isinstance(default_obj.get("grades"), dict):
-        grades_dict = dict(default_obj["grades"])
-    else:
-        for key, value in default_obj.items():
-            if isinstance(value, dict):
-                grades_dict[key] = value
-
-    if "grades" in configured and not grades_dict:
-        grades_dict = _require_mapping("grades", configured["grades"])
-
-    catalog["grades"] = grades_dict
-
-    discovered_subjects: list[str] = []
-    for subj in DEFAULT_SUBJECTS:
-        if subj not in discovered_subjects:
-            discovered_subjects.append(subj)
-
-    for grade_data in grades_dict.values():
-        if isinstance(grade_data, dict):
-            for subj in grade_data:
-                if subj not in discovered_subjects:
-                    discovered_subjects.append(subj)
-
-    for key, value in default_obj.items():
-        if isinstance(value, list) and key not in discovered_subjects:
-            discovered_subjects.append(key)
-
-    top_subjects = configured.get("subjects") if isinstance(configured.get("subjects"), dict) else {}
-    for subj in top_subjects:
-        if subj not in discovered_subjects:
-            discovered_subjects.append(subj)
-
-    subjects_dict: dict[str, list[str]] = {}
-    for subj in discovered_subjects:
-        if isinstance(default_obj.get(subj), list):
-            subjects_dict[subj] = default_obj[subj]
-        elif isinstance(default_obj.get("subjects"), dict) and isinstance(default_obj["subjects"].get(subj), list):
-            subjects_dict[subj] = default_obj["subjects"][subj]
-        elif isinstance(top_subjects.get(subj), list):
-            subjects_dict[subj] = top_subjects[subj]
-        else:
-            subjects_dict[subj] = []
-
-    catalog["subjects"] = subjects_dict
-    return catalog
-
-
-def resolve_subjects(catalog: dict[str, Any], grade: str = "", school_district: str = "") -> list[str]:
-    """Subject list for the current School -> Grade selection.
-
-    Priority:
-    1. Subjects defined for the school district's grade entry (school-specific)
-    2. Subjects defined in the default grade entry
-    3. Global default subject list from catalog["subjects"]
-    """
-    schools = catalog.get("schools") or {}
-    school = schools.get(school_district) if isinstance(schools, dict) else None
-    school_grade = school.get(grade) if isinstance(school, dict) else None
-
-    default_obj = catalog.get("default") if isinstance(catalog.get("default"), dict) else {}
-    default_grade = None
-    if isinstance(default_obj.get("grades"), dict):
-        default_grade = default_obj["grades"].get(grade)
-    elif isinstance(default_obj.get(grade), dict):
-        default_grade = default_obj.get(grade)
-    elif isinstance(catalog.get("grades"), dict):
-        default_grade = catalog["grades"].get(grade)
-
-    # 1. School-specific subjects for this grade
-    if isinstance(school_grade, dict):
-        subjects = list(school_grade.keys())
-        if subjects:
-            return subjects
-
-    # 2. Default grade subjects
-    if isinstance(default_grade, dict):
-        subjects = list(default_grade.keys())
-        if subjects:
-            return subjects
-
-    # 3. Global subject list
-    subjects_dict = catalog.get("subjects")
-    if isinstance(subjects_dict, dict):
-        return list(subjects_dict.keys())
-
-    return DEFAULT_SUBJECTS
-
-
-def resolve_topics(catalog: dict[str, Any], subject: str, grade: str = "", school_district: str = "") -> list[str]:
-    """Topic list for the current School -> Grade -> Subject selection.
-
-    The most specific entry wins:
-    1. The school's own list for that grade and subject (e.g. "Charlotte-Mecklenburg Schools")
-    2. The default grade list for that subject
-    3. The default general subject list (e.g. "General Knowledge")
-    An empty result keeps the free-text topic box, so a sparse file never blocks a test.
-    """
-    schools = catalog.get("schools") or {}
-    school = schools.get(school_district) if isinstance(schools, dict) else None
-    school_grade = school.get(grade) if isinstance(school, dict) else None
-
-    default_obj = catalog.get("default") if isinstance(catalog.get("default"), dict) else {}
-    default_grade = None
-    if isinstance(default_obj.get("grades"), dict):
-        default_grade = default_obj["grades"].get(grade)
-    elif isinstance(default_obj.get(grade), dict):
-        default_grade = default_obj.get(grade)
-    elif isinstance(catalog.get("grades"), dict):
-        default_grade = catalog["grades"].get(grade)
-
-    # 1. School-specific override
-    if isinstance(school_grade, dict):
-        topics = school_grade.get(subject)
-        if isinstance(topics, list) and topics:
-            return [str(topic) for topic in topics]
-
-    # 2. Default grade-specific topics
-    if isinstance(default_grade, dict):
-        topics = default_grade.get(subject)
-        if isinstance(topics, list) and topics:
-            return [str(topic) for topic in topics]
-
-    # 3. Default general / grade-independent topics (e.g. General Knowledge)
-    if isinstance(default_obj.get(subject), list) and default_obj[subject]:
-        return [str(topic) for topic in default_obj[subject]]
-
-    subjects_dict = default_obj.get("subjects") if isinstance(default_obj.get("subjects"), dict) else catalog.get("subjects")
-    if isinstance(subjects_dict, dict):
-        topics = subjects_dict.get(subject)
-        if isinstance(topics, list) and topics:
-            return [str(topic) for topic in topics]
-
-    return []
-
-
-def describe_topic_source(catalog: dict[str, Any], subject: str, grade: str = "", school_district: str = "") -> str:
-    """Return a human-friendly description of where the topics came from."""
-    schools = catalog.get("schools") or {}
-    school = schools.get(school_district) if isinstance(schools, dict) else None
-    school_grade = school.get(grade) if isinstance(school, dict) else None
-    if isinstance(school_grade, dict) and isinstance(school_grade.get(subject), list) and school_grade[subject]:
-        return f"{school_district} · {grade} · {subject}"
-
-    default_obj = catalog.get("default") if isinstance(catalog.get("default"), dict) else {}
-    default_grade = None
-    if isinstance(default_obj.get("grades"), dict):
-        default_grade = default_obj["grades"].get(grade)
-    elif isinstance(default_obj.get(grade), dict):
-        default_grade = default_obj.get(grade)
-    elif isinstance(catalog.get("grades"), dict):
-        default_grade = catalog["grades"].get(grade)
-
-    if isinstance(default_grade, dict) and isinstance(default_grade.get(subject), list) and default_grade[subject]:
-        if school_district and school_district != "Select a school district":
-            return f"{grade} · {subject} (Default fallback for {school_district})"
-        return f"{grade} · {subject} (Default)"
-
-    if isinstance(default_obj.get(subject), list) and default_obj[subject]:
-        return f"{subject} (Default)"
-
-    subjects_dict = default_obj.get("subjects") if isinstance(default_obj.get("subjects"), dict) else catalog.get("subjects")
-    if isinstance(subjects_dict, dict) and isinstance(subjects_dict.get(subject), list) and subjects_dict[subject]:
-        return f"{subject} (Default)"
-
-    return ""
+def resolve_curriculum_topics(curriculum: dict[str, Any], subject: str, unit: str) -> list[str]:
+    """Return the configured topics for a subject and unit."""
+    topics = curriculum.get(subject, {}).get(unit, [])
+    return [str(topic) for topic in topics] if isinstance(topics, list) else []
 
 
 def load_config() -> dict[str, Any]:
@@ -406,7 +142,7 @@ def unique_questions(questions: list[dict[str, Any]], count: int) -> list[dict[s
     return unique[:count]
 
 
-def historical_mistakes(student_name: str, grade: str, subject: str, topic: str) -> list[str]:
+def historical_mistakes(student_name: str, subject: str, unit: str, topic: str) -> list[str]:
     """Questions this student previously answered incorrectly for the same topic.
 
     The query uses named bind parameters so it runs unchanged on SQLite and on a
@@ -415,9 +151,9 @@ def historical_mistakes(student_name: str, grade: str, subject: str, topic: str)
     rows = storage.fetch_all(
         "SELECT questions_json FROM exams"
         " WHERE lower(student_name) = lower(:student_name)"
-        " AND grade = :grade AND subject = :subject AND topic = :topic"
+        " AND subject = :subject AND unit = :unit AND topic = :topic"
         " ORDER BY end_time DESC",
-        {"student_name": student_name, "grade": grade, "subject": subject, "topic": topic},
+        {"student_name": student_name, "subject": subject, "unit": unit, "topic": topic},
     )
     mistakes: list[str] = []
     seen: set[str] = set()
@@ -488,66 +224,37 @@ def _request_text(model: dict[str, Any], prompt: str, temperature: float, max_to
     raise RuntimeError(f"Unsupported model provider: {provider}")
 
 
-def _difficulty_hint(grade: str) -> str:
-    """Return an explicit difficulty instruction for the given grade label.
-
-    The grade is also written verbatim into the prompt, but a bare label such as
-    "Grade 6" leaves the model guessing at the intended level. This maps the
-    numeric part of the label to a concrete difficulty band so a Grade 6 paper is
-    genuinely harder than a Grade 4 paper. Non-numeric labels ("Kindergarten")
-    fall back to an early-years instruction, and an empty label adds nothing.
-    """
-    label = (grade or "").strip()
-    if not label:
-        return ""
-    match = re.search(r"\d+", label)
-    if not match:
-        return " Calibrate every question to age-appropriate early-years difficulty: single-step tasks, concrete everyday contexts, and simple vocabulary."
-    number = int(match.group())
-    if number <= 2:
-        band = "very simple single-step questions, small whole numbers, concrete everyday contexts, and basic vocabulary"
-    elif number <= 5:
-        band = "simple, mostly single-step questions with clear real-world contexts and straightforward vocabulary"
-    elif number <= 8:
-        band = "moderately challenging questions that often need two steps, applied reasoning, and grade-level vocabulary"
-    else:
-        band = "challenging multi-step questions requiring analysis, abstract reasoning, and precise academic vocabulary"
-    return f" Calibrate difficulty precisely to {label}: use {band} — this level must be clearly harder than the grade below it and easier than the grade above."
+def _difficulty_hint(level: str) -> str:
+    """Translate the selected level into clear question-writing guidance."""
+    hints = {
+        "Simple": "Use foundational recall and direct, single-step applications.",
+        "Medium": "Use a balanced mix of conceptual understanding and multi-step applications.",
+        "Complex": "Require deeper analysis, connected concepts, and challenging multi-step reasoning.",
+    }
+    return hints.get(level, hints["Medium"])
 
 
-def generate_questions(model: dict[str, Any], subject: str, grade: str, count: int, school_state: str = "", school_district: str = "", topic: str = "", student_name: str = "", temperature: float = 0.3, include_visuals: bool = False, country: str = "") -> tuple[list[dict[str, Any]], str]:
-    mistakes = historical_mistakes(student_name, grade, subject, topic) if student_name else []
-
-    # Build an explicit location context so the model tailors content and
-    # examples to the student's own country, state/region and school district
-    # instead of producing generic questions.
-    location_parts = [part for part in (school_district, school_state, country) if part and part.strip()]
-    location_context = ""
-    if location_parts:
-        location_context = (
-            f" The student lives in {country or 'their country'}"
-            + (f", in the state/region of {school_state}" if school_state else "")
-            + (f", and attends {school_district}" if school_district else "")
-            + ". Align the curriculum, examples, names, places, currency, units of measurement and any real-world contexts with this location"
-            + (" and this district's publicly available curriculum" if school_district else "")
-            + ". Do not use examples that would only make sense elsewhere."
-        )
-
-    topic_context = ""
-    if topic:
-        topic_context = f" Focus every question on the specific topic '{topic}' — the questions must be directly about this topic, not the wider subject."
-    grade_context = f" These questions are for a {grade} student." if grade else ""
-    difficulty_context = _difficulty_hint(grade)
-    mistake_context = f" Prioritise revisiting these skills the student previously got wrong: {mistakes}. Test the same skills with fresh wording, numbers and contexts." if mistakes else ""
-    visual_context = " Visual references are allowed for some questions when useful." if include_visuals else " Do not refer to pictures, diagrams, charts, maps, images, or anything the student cannot see. Every question must be answerable from text alone."
-    question_subject = topic if subject == "Others" and topic else subject
+def generate_questions(
+    model: dict[str, Any],
+    subject: str,
+    unit: str,
+    topic: str,
+    level: str,
+    count: int,
+    student_name: str = "",
+    temperature: float = 0.3,
+) -> tuple[list[dict[str, Any]], str]:
+    mistakes = historical_mistakes(student_name, subject, unit, topic) if student_name else []
+    mistake_context = (
+        f" Revisit these skills previously missed, using fresh questions: {mistakes}."
+        if mistakes else ""
+    )
     prompt = (
-        f"Create exactly {count} multiple-choice questions at the level of the subject {question_subject},"
-        f" for {grade} students in {country or 'their country'}."
-        f"{grade_context}{topic_context}{difficulty_context}{location_context}{mistake_context}{visual_context}"
-        " Questions must be unique within this exam and must not be generic filler — each question must reflect"
-        " the specified location, grade level and topic. Vary recall, application, reasoning, vocabulary, and real-world contexts."
-        " Return only a JSON array with no markdown. Each item must have question, options (exactly four strings), and answer (one option string)."
+        f"Create exactly {count} multiple-choice questions for subject '{subject}', unit '{unit}', "
+        f"and topic '{topic}'. Set the difficulty to '{level}': {_difficulty_hint(level)} "
+        "Keep every question directly within the selected topic. Questions must be distinct and technically accurate. "
+        f"{mistake_context}Return only a JSON array with no markdown. Each item must have question, "
+        "options (exactly four strings), and answer (one option string)."
     )
     last_error = "unknown response"
     for _ in range(3):

@@ -9,11 +9,9 @@ import streamlit as st
 from backend.services import storage
 from backend.services.llm_backend import (
     load_config,
-    load_grades,
-    load_locations,
-    load_topics,
-    resolve_subjects,
-    resolve_topics,
+    load_curriculum,
+    resolve_curriculum_topics,
+    resolve_units,
 )
 from backend.services.auth_storage import get_students_by_parent, get_exams_by_parent
 from backend.services.logging_config import get_logger
@@ -29,23 +27,26 @@ from ui.components.appearance import render_appearance_toggle
 
 logger = get_logger(__name__)
 
-TOPIC_CATALOG = load_topics()
-SUBJECT_CATALOG = list(TOPIC_CATALOG["subjects"])
+CURRICULUM = load_curriculum()
+SUBJECT_CATALOG = list(CURRICULUM)
 CONFIG = load_config()
-LOCATIONS = load_locations()
-COUNTRIES = list(LOCATIONS.keys())
 DEFAULTS = CONFIG.get("defaults", {})
+LEVELS = ["Simple", "Medium", "Complex"]
 
 
-def topics_for_subject(subject: str, grade: str, school_district: str) -> list[str]:
-    """All configured topics for a Subject."""
-    if subject and subject != "All subjects":
-        return resolve_topics(TOPIC_CATALOG, subject, grade, school_district)
+def units_for_subject(subject: str) -> list[str]:
+    subjects = SUBJECT_CATALOG if subject in {"All subjects", "Full Practice Test"} else [subject]
+    return sorted({unit for name in subjects for unit in resolve_units(CURRICULUM, name)})
 
-    combined: set[str] = set()
-    for name in SUBJECT_CATALOG:
-        combined.update(resolve_topics(TOPIC_CATALOG, name, grade, school_district))
-    return sorted(combined)
+
+def topics_for_selection(subject: str, unit: str) -> list[str]:
+    subjects = SUBJECT_CATALOG if subject in {"All subjects", "Full Practice Test"} else [subject]
+    return sorted({
+        topic
+        for name in subjects
+        for current_unit in (resolve_units(CURRICULUM, name) if unit == "All units" else [unit])
+        for topic in resolve_curriculum_topics(CURRICULUM, name, current_unit)
+    })
 
 
 def format_question_time(seconds: float) -> str:
@@ -182,89 +183,29 @@ if not rows:
 with st.container(border=True):
     st.markdown("#### Filter results")
 
-    first, second, third = st.columns(3)
-    fourth, fifth, sixth = st.columns(3)
-
-    grades_list = load_grades(load_topics(), CONFIG)
-
-    default_country = DEFAULTS.get(
-        "country",
-        COUNTRIES[0] if COUNTRIES else "United States",
-    )
-    country_index = (
-        COUNTRIES.index(default_country)
-        if default_country in COUNTRIES
-        else 0
-    )
-    country_filter = first.selectbox("Country", COUNTRIES, index=country_index)
-
-    country_states = LOCATIONS.get(country_filter, {})
-    state_names = list(country_states.keys())
-
-    if state_names:
-        default_state = DEFAULTS.get("state", state_names[0])
-        state_options = ["All states"] + state_names
-        state_index = (
-            state_options.index(default_state)
-            if default_state in state_options
-            else 0
-        )
-        state_filter = second.selectbox("State", state_options, index=state_index)
-    else:
-        state_filter = "All states"
-        second.selectbox("State", ["All states"], index=0, disabled=True)
-
-    grade_options = ["All grades"] + grades_list
-    grade_filter = third.selectbox("Grade", grade_options, index=0)
-
-    subject_options = ["All subjects"] + SUBJECT_CATALOG
-    subject_filter = fourth.selectbox("Subject", subject_options, index=0)
-
-    topic_catalog = topics_for_subject(
-        subject_filter,
-        "" if grade_filter == "All grades" else grade_filter,
-        "",
-    )
-    topic_options = ["All topics"] + topic_catalog
-
-    previous_subject = st.session_state.get("results_topic_subject")
-    previous_grade = st.session_state.get("results_topic_grade")
-
-    subject_or_grade_changed = (
-        previous_subject != subject_filter
-        or previous_grade != grade_filter
-    )
-
-    if subject_or_grade_changed or st.session_state.get("results_topic_filter") not in topic_options:
-        st.session_state.results_topic_subject = subject_filter
-        st.session_state.results_topic_grade = grade_filter
-        st.session_state.results_topic_filter = "All topics"
-
-    topic_filter = fifth.selectbox(
-        "Topic",
-        topic_options,
-        key="results_topic_filter",
-    )
+    first, second, third, fourth = st.columns(4)
+    subject_filter = first.selectbox("Subject", ["All subjects", *SUBJECT_CATALOG, "Full Practice Test"])
+    unit_options = ["All units", *units_for_subject(subject_filter)]
+    unit_filter = second.selectbox("Unit", unit_options)
+    topic_options = ["All topics", *topics_for_selection(subject_filter, unit_filter)]
+    topic_filter = third.selectbox("Topic", topic_options)
+    level_filter = fourth.selectbox("Level", ["All levels", *LEVELS])
 
     # Apply filters
     filtered = rows
-
-    if country_filter != "All countries":
-        filtered = [row for row in filtered if row.get("country") == country_filter]
-
-    if state_filter != "All states":
+    for selector, field, all_label in (
+        (subject_filter, "subject", "All subjects"),
+        (unit_filter, "unit", "All units"),
+        (topic_filter, "topic", "All topics"),
+        (level_filter, "level", "All levels"),
+    ):
+        if selector == all_label:
+            continue
         filtered = [
-            row for row in filtered if row.get("school_state") == state_filter
+            row for row in filtered
+            if row.get(field) == selector
+            or any(item.get(field) == selector for item in json.loads(row["questions_json"]))
         ]
-
-    if grade_filter != "All grades":
-        filtered = [row for row in filtered if row["grade"] == grade_filter]
-
-    if subject_filter != "All subjects":
-        filtered = [row for row in filtered if row["subject"] == subject_filter]
-
-    if topic_filter != "All topics":
-        filtered = [row for row in filtered if row.get("topic") == topic_filter]
 
 if not filtered:
     st.info("No results match these filters.")
@@ -278,27 +219,19 @@ else:
         with st.expander(
             f"{row['student_name']} · {row['subject']} · {row['score']}% · {ended}"
         ):
-            metrics = st.columns([1.3, 1, 1, 1, 1, 1.3])
-            metrics[0].metric(
-                "Grade",
-                str(row["grade"]).removeprefix("Grade ").strip()
-                or str(row["grade"]),
-            )
-            metrics[1].metric("Score", f"{row['score']}%")
-            metrics[2].metric("Correct", row["correct_count"])
-            metrics[3].metric("Wrong", row["wrong_count"])
-            metrics[4].metric("Questions", row["question_count"])
-            metrics[5].metric("Overall time", overall_time)
+            metrics = st.columns([1, 1, 1, 1, 1])
+            metrics[0].metric("Score", f"{row['score']}%")
+            metrics[1].metric("Correct", row["correct_count"])
+            metrics[2].metric("Wrong", row["wrong_count"])
+            metrics[3].metric("Questions", row["question_count"])
+            metrics[4].metric("Overall time", overall_time)
 
-            location = (
-                f"{row['country']} · {row['school_state']} · {row['school_district']}"
-                if row["school_district"]
-                else row["country"]
-            )
+            unit = f" · Unit: {row['unit']}" if row.get("unit") else ""
             topic = f" · Topic: {row['topic']}" if row["topic"] else ""
+            level = f" · Level: {row['level']}" if row.get("level") else ""
 
             st.caption(
-                f"Location: {location}{topic} · Time limit: {row['time_limit']} minutes · Completed: {ended}"
+                f"{row['subject']}{unit}{topic}{level} · Time limit: {row['time_limit']} minutes · Completed: {ended}"
             )
 
             review = json.loads(row["questions_json"])

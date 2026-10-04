@@ -39,21 +39,12 @@ from ui.components.appearance import render_appearance_toggle
 
 logger = get_logger(__name__)
 
-
-
-
-
-
 # Page configuration
 st.set_page_config(page_title="Parent Login · Study Sprint", page_icon="🔐", layout="wide")
 
 # Configuration used throughout the page
-TOPICS = llm_backend.load_topics()
 CONFIG = llm_backend.load_config()
 DEFAULTS = CONFIG["defaults"]
-LOCATIONS = llm_backend.load_locations()
-COUNTRIES = list(LOCATIONS.keys())
-GRADE_OPTIONS = llm_backend.load_grades(TOPICS, CONFIG)
 
 # Theme
 theme = render_appearance_toggle(default=DEFAULTS.get("appearance", "Dark"))
@@ -66,14 +57,6 @@ inject_parent_theme(theme)
 
 
 
-
-
-def option_index(options: list[Any], preferred: Any, fallback: int = 0) -> int:
-    """Index of the configured default value, or a fallback when it is absent."""
-    try:
-        return options.index(preferred)
-    except ValueError:
-        return fallback
 
 
 def authenticate_parent(parent_data: dict[str, Any]) -> None:
@@ -92,7 +75,7 @@ def generate_student_id() -> str:
 
 
 def render_child_fields(prefix: str, index: int, defaults: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Render one child's name + location + grade inputs.
+    """Render one child's name field.
 
     ``prefix`` namespaces the widget keys so several children can be shown on
     one page without clashing. Returns the collected child values.
@@ -101,59 +84,7 @@ def render_child_fields(prefix: str, index: int, defaults: dict[str, Any] | None
     st.markdown(f"##### Child {index}")
     name_key = f"{prefix}_name_{index}"
     child_name = st.text_input("Student Name", value=defaults.get("student_name", ""), key=name_key)
-
-    default_country = defaults.get("country", DEFAULTS["country"])
-    country = st.selectbox(
-        "Country",
-        COUNTRIES,
-        index=option_index(COUNTRIES, default_country),
-        key=f"{prefix}_country_{index}",
-    )
-    country_states = LOCATIONS.get(country, {})
-    if country_states:
-        state_names = list(country_states.keys())
-        state_options = ["Select a state"] + state_names
-        default_state = defaults.get("school_state", DEFAULTS["state"])
-        fallback_state = "North Carolina" if "North Carolina" in state_names else (state_names[0] if state_names else "")
-        school_state = st.selectbox(
-            "State",
-            state_options,
-            index=option_index(state_options, default_state, fallback=option_index(state_options, fallback_state)),
-            key=f"{prefix}_state_{index}",
-        )
-    else:
-        school_state = ""
-
-    districts = country_states.get(school_state, []) if school_state and school_state != "Select a state" else []
-    if country_states and districts:
-        district_options = ["Select a school district"] + districts
-        default_district = defaults.get("school_district", DEFAULTS["school_district"])
-        school_district = st.selectbox(
-            "School District",
-            district_options,
-            index=option_index(district_options, default_district, fallback=1 if districts else 0),
-            key=f"{prefix}_district_{index}",
-        )
-    elif country_states and school_state and school_state != "Select a state":
-        school_district = st.selectbox(
-            "School District", ["Select a school district"], index=0, key=f"{prefix}_district_{index}"
-        )
-    else:
-        school_district = ""
-
-    grade = st.selectbox(
-        "Grade",
-        GRADE_OPTIONS,
-        index=option_index(GRADE_OPTIONS, defaults.get("grade", DEFAULTS["grade"])),
-        key=f"{prefix}_grade_{index}",
-    )
-    return {
-        "student_name": child_name,
-        "grade": grade,
-        "country": country,
-        "school_state": school_state,
-        "school_district": school_district,
-    }
+    return {"student_name": child_name}
 
 
 def validate_signup(form_data: dict[str, Any]) -> tuple[bool, str]:
@@ -164,11 +95,6 @@ def validate_signup(form_data: dict[str, Any]) -> tuple[bool, str]:
     for index, child in enumerate(children, start=1):
         if not (child.get("student_name") or "").strip():
             return False, f"Child {index}: student name is required."
-        if not child.get("grade"):
-            return False, f"Child {index}: grade is required."
-        if not child.get("country"):
-            return False, f"Child {index}: country is required."
-
     if not form_data.get("parent_name"):
         return False, "Parent name is required"
     if not form_data.get("parent_email"):
@@ -349,6 +275,8 @@ with signup_tab:
         st.markdown("---")
 
     auth_type = st.session_state.get("auth_type", "manual")
+    if "signup_child_count" not in st.session_state:
+        st.session_state.signup_child_count = 1
 
     st.markdown("### Children")
     st.caption("You can register more than one child now. You can always add or remove children later from the Parent Profile page.")
@@ -356,7 +284,7 @@ with signup_tab:
         "How many children would you like to register?",
         min_value=1,
         max_value=10,
-        value=int(st.session_state.get("signup_child_count", 1)),
+        value=st.session_state.signup_child_count,
         step=1,
         key="signup_child_count",
     )
@@ -421,10 +349,8 @@ with signup_tab:
                         student_id=student_id,
                         student_name=child["student_name"].strip(),
                         parent_id=parent_id,
-                        grade=child["grade"],
-                        country=child["country"],
-                        school_state=child["school_state"],
-                        school_district=child["school_district"],
+                        grade="",
+                        country="",
                     )
                     created_ids.append(student_id)
                 logger.info(
@@ -434,11 +360,13 @@ with signup_tab:
                     ", ".join(created_ids),
                 )
 
-                # Clear transient sign-up state
+                # Clear transient sign-up state. Reset the child-count key before the
+                # next render so the widget starts from its default value without
+                # mutating a widget-owned session state entry after instantiation.
                 st.session_state.google_user_data = None
                 st.session_state.auth_type = "manual"
                 st.session_state.show_signup = False
-                st.session_state.signup_child_count = 1
+                st.session_state.pop("signup_child_count", None)
 
                 # Auto sign-in the new parent and continue.
                 parent = get_parent_by_username(parent_username)

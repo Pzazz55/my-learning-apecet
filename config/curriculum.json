@@ -1,0 +1,169 @@
+{
+  "Mathematics": {
+    "Matrices & Determinants": [
+      "Rank of a Matrix",
+      "Cramer's Rule",
+      "Eigenvalues and Eigenvectors",
+      "Cayley-Hamilton Theorem"
+    ],
+    "Trigonometry": [
+      "Trigonometric Ratios and Compound Angles",
+      "Multiple and Sub-multiple Angles",
+      "Inverse Trigonometric Functions"
+    ],
+    "Analytical Geometry": [
+      "Straight Lines and Slope",
+      "Circles and Conics"
+    ],
+    "Calculus": [
+      "Limits and Continuity",
+      "Rules of Differentiation",
+      "Partial Differentiation",
+      "Maxima and Minima",
+      "Methods of Integration"
+    ],
+    "Differential Equations": [
+      "First Order Linear Differential Equations",
+      "Higher Order Equations with Constant Coefficients"
+    ]
+  },
+  "Physics": {
+    "Units & Dimensions": [
+      "Dimensional Variables and Constants",
+      "Principle of Homogeneity",
+      "Error Analysis"
+    ],
+    "Elements of Vectors": [
+      "Scalar and Vector Products",
+      "Components of Vectors",
+      "Relative Velocity"
+    ],
+    "Kinematics & Friction": [
+      "Equations of Motion",
+      "Projectile Motion",
+      "Laws of Friction and Coefficients"
+    ],
+    "Work, Power & Energy": [
+      "Kinetic and Potential Energy",
+      "Work-Energy Theorem",
+      "Conservation Laws"
+    ],
+    "Simple Harmonic Motion & Sound": [
+      "Attributes of SHM",
+      "Doppler Effect",
+      "Reverberation and Acoustics"
+    ],
+    "Heat & Thermodynamics": [
+      "Ideal Gas Laws",
+      "Specific Heats (Cp and Cv)",
+      "Basic Thermodynamic Cycles"
+    ],
+    "Modern Physics": [
+      "Ohm’s Law and Kirchhoff's Laws",
+      "Superconductors",
+      "Photoelectric Effect"
+    ]
+  },
+  "Chemistry": {
+    "Atomic Structure & Chemical Bonding": [
+      "Quantum Numbers and Bohr's Theory",
+      "Pauli's Principle and Hund's Rule",
+      "Chemical Bonding and Hybridization"
+    ],
+    "Solutions, Acids & Bases": [
+      "Molarity and Normality Calculations",
+      "pH Values and Buffer Solutions",
+      "Volumetric Indicators"
+    ],
+    "Electrochemistry": [
+      "Faraday's Laws of Electrolysis",
+      "Galvanic Cells and EMF",
+      "Fuel Cells"
+    ],
+    "Water Technology": [
+      "Estimation of Hardness",
+      "Municipal Water Treatment",
+      "Water Softening Methods"
+    ],
+    "Corrosion & Engineering Materials": [
+      "Corrosion Mechanisms and Control",
+      "Protective Coatings",
+      "Plastics and Rubbers"
+    ],
+    "Fuels & Environmental Chemistry": [
+      "Calorific Values of Fuels",
+      "Fractional Distillation of Petroleum",
+      "Types of Environmental Pollution"
+    ]
+  },
+  "Mechanical Engineering": {
+    "Workshop Technology & Conventions": [
+      "Carpentry and Fitting Operations",
+      "Sheet Metal Work and Forging Processes",
+      "Molding Sands and Casting Defects",
+      "First-Angle Projections and Engineering Drawing Symbols"
+    ],
+    "Machining & Advanced Machine Tools": [
+      "Lathe Construction and Machining Operations",
+      "Shaper, Planer, and Slotting Machines",
+      "Milling and Grinding Operations",
+      "Jigs and Fixtures (3-2-1 Principle)",
+      "Unconventional Machining (EDM, USM, ECM)"
+    ],
+    "Engineering Materials & Solid Mechanics": [
+      "Mechanical Properties of Materials",
+      "Iron-Carbon Equilibrium Diagram",
+      "Stress-Strain Behavior and Hooke's Law",
+      "Shear Force and Bending Moment Diagrams (SFD/BMD)",
+      "Torsion in Shafts and Helical Spring Design"
+    ],
+    "Thermodynamics & Heat Power": [
+      "Laws of Thermodynamics",
+      "Perfect Gas Processes",
+      "Air Standard Cycles (Otto, Diesel, Dual)",
+      "Air Compressors",
+      "Internal Combustion (IC) Engine Functions and Performance"
+    ],
+    "Design of Machine Elements": [
+      "Fundamental Design Principles and Factor of Safety",
+      "Stress Concentration Factors",
+      "Design of Shafts, Keys, and Cotters",
+      "Welded and Threaded Fasteners",
+      "Power Screws and Bearings"
+    ],
+    "Industrial Management & Engineering": [
+      "Principles of Management and Organizational Structures",
+      "Production Planning & Control (PPC)",
+      "Work Study and Material Handling Systems",
+      "Network Analysis (PERT/CPM)",
+      "Quality Control Charts"
+    ],
+    "Hydraulic Machines & Pneumatics": [
+      "Impact of Fluid Jets",
+      "Water Turbines (Pelton, Francis, Kaplan)",
+      "Centrifugal and Reciprocating Pumps",
+      "Fundamental Pneumatic Circuitry"
+    ],
+    "Steam Systems & Components": [
+      "Properties of Steam",
+      "Boiler Types and Boiler Mountings/Accessories",
+      "Maximum Discharge through Steam Nozzles",
+      "Impulse vs. Reaction Turbines",
+      "Steam Condenser Systems"
+    ],
+    "Automobile Engineering": [
+      "Vehicle Chassis and Frame Structures",
+      "Transmission Systems (Clutch, Gearboxes, Differentials)",
+      "Suspension and Braking Systems",
+      "Steering Geometries",
+      "Vehicle Electrical Layouts"
+    ],
+    "Refrigeration & Air Conditioning": [
+      "Air Refrigeration Systems",
+      "Vapor Compression Refrigeration System (VCRS)",
+      "Classification of Refrigerants",
+      "Psychrometric Properties and Charts",
+      "Comfort Air Conditioning Configurations"
+    ]
+  }
+}

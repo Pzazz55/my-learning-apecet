@@ -18,14 +18,6 @@
     "status": "Provider quota returned 429"
   },
   {
-    "name": "Groq GPT OSS 20B (free tier)",
-    "provider": "groq",
-    "model": "openai/gpt-oss-20b",
-    "api_key_env": "GROQ_API_KEY",
-    "free_tier": true,
-    "enabled": true
-  },
-  {
     "name": "Groq Qwen 3.8 27B (free tier)",
     "provider": "groq",
     "model": "qwen/qwen3.8-27b",
@@ -73,6 +65,14 @@
     "free_tier": false,
     "enabled": false,
     "status": "Provider quota returned 429"
+  },
+  {
+    "name": "Groq GPT OSS 20B (free tier)",
+    "provider": "groq",
+    "model": "openai/gpt-oss-20b",
+    "api_key_env": "GROQ_API_KEY",
+    "free_tier": true,
+    "enabled": true
   },
   {
     "name": "Hugging Face FLAN-T5 Base",

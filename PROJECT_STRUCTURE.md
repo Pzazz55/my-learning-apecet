@@ -18,9 +18,8 @@ my-learning-app/
 ├── config/                    # Configuration files
 │   ├── __init__.py
 │   ├── config.json            # Application configuration
-│   ├── locations.json         # Geographic location data
-│   ├── models.json            # AI model configurations
-│   └── topics.json            # Educational topics and subjects
+│   ├── curriculum.json        # Subject, unit, and topic catalog
+│   └── models.json            # AI model configurations
 ├── middleware/                # Cross-cutting concerns and middleware
 │   ├── __init__.py
 │   └── auth/                  # Authentication and authorization
@@ -83,7 +82,7 @@ All imports now follow the new package structure:
 ```python
 # Backend services
 from backend.services import storage
-from backend.services.llm_backend import load_config, load_topics
+from backend.services.llm_backend import load_config, load_curriculum
 from backend.services.logging_config import get_logger
 
 # Middleware

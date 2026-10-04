@@ -1,7 +1,7 @@
 [project]
 name = "my-learning-app"
 version = "0.1.0"
-description = "A Streamlit education app for grade-aware multiple-choice exams, timed student sessions, local result storage, and parent review."
+description = "A Streamlit practice app with subject, unit, topic, and level-based questions, timed exams, saved results, and parent review."
 readme = "README.md"
 authors = [
     { name = "Pzazz55", email = "Pzazz55@users.noreply.github.com" }

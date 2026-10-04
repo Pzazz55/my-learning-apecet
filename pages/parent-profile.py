@@ -38,12 +38,8 @@ logger = get_logger(__name__)
 st.set_page_config(page_title="Parent Profile · Study Sprint", page_icon="👤", layout="wide")
 
 # Load configuration first so DEFAULTS is available to the theme toggle.
-TOPICS = llm_backend.load_topics()
 CONFIG = llm_backend.load_config()
 DEFAULTS = CONFIG.get("defaults", {})
-LOCATIONS = llm_backend.load_locations()
-COUNTRIES = list(LOCATIONS.keys())
-GRADE_OPTIONS = llm_backend.load_grades(TOPICS, CONFIG)
 
 # Theme
 theme = render_appearance_toggle(default=DEFAULTS.get("appearance", "Dark"))
@@ -92,16 +88,8 @@ st.caption(f"Manage profile for {student['student_name']} ({student['student_id'
 # Display current profile information
 st.markdown("### Current Profile Information")
 
-col1, col2 = st.columns(2)
-with col1:
-    st.markdown(f"**Student Name:** {student['student_name']}")
-    st.markdown(f"**Student ID:** {student['student_id']}")
-    st.markdown(f"**Grade:** {student['grade']}")
-
-with col2:
-    st.markdown(f"**Country:** {student['country']}")
-    st.markdown(f"**State:** {student['school_state'] or 'Not specified'}")
-    st.markdown(f"**School District:** {student['school_district'] or 'Not specified'}")
+st.markdown(f"**Student Name:** {student['student_name']}")
+st.markdown(f"**Student ID:** {student['student_id']}")
 
 st.markdown(f"**Registered:** {datetime.fromisoformat(student['created_at']).strftime('%B %d, %Y')}")
 st.markdown(f"**Last Updated:** {datetime.fromisoformat(student['updated_at']).strftime('%B %d, %Y at %I:%M %p')}")
@@ -113,30 +101,6 @@ st.markdown("### Update Profile Information")
 with st.form("update_profile"):
     st.markdown("#### Student Information")
     new_student_name = st.text_input("Student Name", value=student['student_name'])
-    
-    st.markdown("#### Location & School")
-    new_country = st.selectbox("Country", COUNTRIES, index=COUNTRIES.index(student['country']) if student['country'] in COUNTRIES else 0)
-    
-    country_states = LOCATIONS.get(new_country, {})
-    if country_states:
-        state_names = list(country_states.keys())
-        state_options = ["Select a state"] + state_names
-        current_state = student['school_state']
-        new_school_state = st.selectbox("State", state_options, index=state_options.index(current_state) if current_state in state_options else 0)
-        
-        districts = country_states.get(new_school_state, []) if new_school_state and new_school_state != "Select a state" else []
-        if districts:
-            district_options = ["Select a school district"] + districts
-            current_district = student['school_district']
-            new_school_district = st.selectbox("School District", district_options, index=district_options.index(current_district) if current_district in district_options else 0)
-        else:
-            new_school_district = ""
-    else:
-        new_school_state = ""
-        new_school_district = ""
-    
-    new_grade = st.selectbox("Grade", GRADE_OPTIONS, index=GRADE_OPTIONS.index(student['grade']) if student['grade'] in GRADE_OPTIONS else 0)
-    
     submitted = st.form_submit_button("Update Profile", type="primary")
 
 if submitted:
@@ -144,10 +108,6 @@ if submitted:
         update_student(
             student_id=current_student_id,
             student_name=new_student_name,
-            grade=new_grade,
-            country=new_country,
-            school_state=new_school_state,
-            school_district=new_school_district,
         )
         
         st.success("Profile updated successfully!")
@@ -166,23 +126,6 @@ st.caption("Add another child to this account, or remove a child you no longer n
 with st.expander("➕ Add a child", expanded=False):
     with st.form("add_child"):
         new_child_name = st.text_input("Child's name", key="add_child_name")
-        add_country = st.selectbox("Country", COUNTRIES, index=COUNTRIES.index(DEFAULTS.get("country", COUNTRIES[0])) if DEFAULTS.get("country") in COUNTRIES else 0, key="add_child_country")
-        add_states = LOCATIONS.get(add_country, {})
-        if add_states:
-            add_state_names = list(add_states.keys())
-            add_state_options = ["Select a state"] + add_state_names
-            default_state = DEFAULTS.get("state", add_state_names[0])
-            add_state = st.selectbox("State", add_state_options, index=add_state_options.index(default_state) if default_state in add_state_options else 0, key="add_child_state")
-        else:
-            add_state = ""
-        add_districts = add_states.get(add_state, []) if add_state and add_state != "Select a state" else []
-        if add_districts:
-            add_district_options = ["Select a school district"] + add_districts
-            default_district = DEFAULTS.get("school_district", add_districts[0])
-            add_district = st.selectbox("School District", add_district_options, index=add_district_options.index(default_district) if default_district in add_district_options else 1, key="add_child_district")
-        else:
-            add_district = ""
-        add_grade = st.selectbox("Grade", GRADE_OPTIONS, index=GRADE_OPTIONS.index(DEFAULTS.get("grade", GRADE_OPTIONS[0])) if DEFAULTS.get("grade") in GRADE_OPTIONS else 0, key="add_child_grade")
         add_submitted = st.form_submit_button("Add child", type="primary")
 
     if add_submitted:
@@ -195,10 +138,8 @@ with st.expander("➕ Add a child", expanded=False):
                     student_id=new_id,
                     student_name=new_child_name.strip(),
                     parent_id=parent["id"],
-                    grade=add_grade,
-                    country=add_country,
-                    school_state=add_state if add_state != "Select a state" else "",
-                    school_district=add_district,
+                    grade="",
+                    country="",
                 )
                 logger.info("Parent %s added child '%s' (%s).", parent["id"], new_child_name.strip(), new_id)
                 st.success(f"Added {new_child_name.strip()} ({new_id}).")

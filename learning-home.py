@@ -1,7 +1,6 @@
 ﻿from __future__ import annotations
 
 import json
-import random
 import time
 from datetime import datetime, timezone
 from html import escape
@@ -11,7 +10,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from backend.services import storage
-from backend.services.llm_backend import DEFAULT_SUBJECTS, describe_topic_source, generate_questions as generate_questions_from_backend, load_config, load_grades, load_locations, load_models, load_topics, resolve_subjects, resolve_topics
+from backend.services.llm_backend import generate_questions as generate_questions_from_backend, load_config, load_curriculum, load_models, resolve_curriculum_topics, resolve_units
 from backend.services.auth_storage import get_students_by_parent
 from backend.services.email_service import send_exam_report_email
 from backend.services.logging_config import get_logger
@@ -27,22 +26,14 @@ from ui.components.appearance import render_appearance_toggle
 
 logger = get_logger(__name__)
 
-TOPICS = load_topics()
+CURRICULUM = load_curriculum()
 CONFIG = load_config()
 DEFAULTS = CONFIG["defaults"]
-LOCATIONS = load_locations()
-COUNTRIES = list(LOCATIONS.keys())
-GRADE_OPTIONS = load_grades(TOPICS, CONFIG)
 QUESTION_COUNTS = [5, 10, 15, 20, 25, 30]
-STATE_PLACEHOLDER = "Select a state"
-DISTRICT_PLACEHOLDER = "Select a school district"
-VISUALS_BY_SUBJECT = {
-    "Maths": ("https://images.unsplash.com/photo-1509228468518-180dd4864904?auto=format&fit=crop&w=1200&q=80", "Maths visual"),
-    "English": ("https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?auto=format&fit=crop&w=1200&q=80", "Books and reading"),
-    "Science": ("https://images.unsplash.com/photo-1532094349884-543bc11b234d?auto=format&fit=crop&w=1200&q=80", "Science laboratory"),
-    "General Knowledge": ("https://images.unsplash.com/photo-1521295121783-8a321d551ad2?auto=format&fit=crop&w=1200&q=80", "World map"),
-    "Others": ("https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=1200&q=80", "Learning and discovery"),
-}
+LEVEL_OPTIONS = ["Simple", "Medium", "Complex"]
+FULL_TEST_COUNTS = {"Mathematics": 50, "Physics": 50, "Mechanical Engineering": 100}
+FULL_TEST_TOTAL = sum(FULL_TEST_COUNTS.values())
+FULL_TEST_MINUTES = 180
 
 st.set_page_config(page_title="Study Sprint", page_icon="*", layout="wide", initial_sidebar_state="collapsed")
 
@@ -52,41 +43,26 @@ def inject_styles(theme: str) -> None:
     ui_inject_styles(theme)
 
 
-def save_question_set(student_name: str, grade: str, subject: str, topic: str, questions: list[dict[str, Any]]) -> int:
+def save_question_set(student_name: str, subject: str, unit: str, topic: str, level: str, questions: list[dict[str, Any]]) -> int:
     """Store a generated question set and return its id.
 
     ``RETURNING id`` reads the new row's key on SQLite and on PostgreSQL alike.
     """
     question_set_id = storage.execute(
-        "INSERT INTO question_sets (student_name, grade, subject, topic, questions_json, created_at)"
-        " VALUES (:student_name, :grade, :subject, :topic, :questions_json, :created_at)"
+        "INSERT INTO question_sets (student_name, grade, subject, topic, unit, level, questions_json, created_at)"
+        " VALUES (:student_name, '', :subject, :topic, :unit, :level, :questions_json, :created_at)"
         " RETURNING id",
         {
             "student_name": student_name,
-            "grade": grade,
             "subject": subject,
             "topic": topic,
+            "unit": unit,
+            "level": level,
             "questions_json": json.dumps(questions),
             "created_at": datetime.now(timezone.utc).isoformat(),
         },
     )
     return int(question_set_id or 0)
-
-
-def attach_visuals(questions: list[dict[str, Any]], subject: str, topic: str, enabled: bool) -> list[dict[str, Any]]:
-    if not enabled or not questions:
-        return questions
-    visual = VISUALS_BY_SUBJECT.get(subject)
-    if not visual:
-        return questions
-    image_count = max(1, round(len(questions) * 0.3))
-    randomizer = random.Random(f"{subject}:{topic}:{len(questions)}")
-    selected_indexes = set(randomizer.sample(range(len(questions)), min(image_count, len(questions))))
-    for index, question in enumerate(questions):
-        if index in selected_indexes:
-            question["image_url"] = visual[0]
-            question["image_alt"] = f"{visual[1]} for {topic}" if topic else visual[1]
-    return questions
 
 
 def reset_exam() -> None:
@@ -139,7 +115,7 @@ def submit_exam() -> None:
     correct = sum(answers.get(index) == question["answer"] for index, question in enumerate(exam["questions"]))
     ended = datetime.now(timezone.utc)
     record = {
-        "student_name": exam["student_name"], "grade": exam["grade"], "country": exam["country"], "school_state": exam["school_state"], "school_district": exam["school_district"], "subject": exam["subject"], "topic": exam["topic"], "question_set_id": exam["question_set_id"],
+        "student_name": exam["student_name"], "grade": "", "country": "", "school_state": "", "school_district": "", "subject": exam["subject"], "unit": exam["unit"], "topic": exam["topic"], "level": exam["level"], "question_set_id": exam["question_set_id"],
         "question_count": len(exam["questions"]), "time_limit": exam["time_limit"], "start_time": exam["start_time"],
         "end_time": ended.isoformat(), "score": round(correct / len(exam["questions"]) * 100), "correct_count": correct,
         "wrong_count": len(exam["questions"]) - correct,
@@ -163,8 +139,8 @@ def submit_exam() -> None:
 
     try:
         storage.execute(
-            "INSERT INTO exams (student_name, student_id, parent_id, grade, country, school_state, school_district, subject, topic, question_set_id, question_count, time_limit, start_time, end_time, score, correct_count, wrong_count, questions_json)"
-            " VALUES (:student_name, :student_id, :parent_id, :grade, :country, :school_state, :school_district, :subject, :topic, :question_set_id, :question_count, :time_limit, :start_time, :end_time, :score, :correct_count, :wrong_count, :questions_json)",
+            "INSERT INTO exams (student_name, student_id, parent_id, grade, country, school_state, school_district, subject, unit, topic, level, question_set_id, question_count, time_limit, start_time, end_time, score, correct_count, wrong_count, questions_json)"
+            " VALUES (:student_name, :student_id, :parent_id, :grade, :country, :school_state, :school_district, :subject, :unit, :topic, :level, :question_set_id, :question_count, :time_limit, :start_time, :end_time, :score, :correct_count, :wrong_count, :questions_json)",
             record,
         )
     except Exception as db_error:
@@ -228,7 +204,7 @@ def show_result() -> None:
         student_answer = item.get("student_answer") or "Not answered"
         status = "Correct" if student_answer == item["answer"] else "Wrong"
         st.markdown(f"**{index}. {item['question']}**  \nYour answer: {student_answer} - Correct answer: {item['answer']} - Time: {format_duration(item.get('time_seconds', 0))} - **{status}**")
-    if st.button("Start another exam", type="primary"):
+    if st.button("Go Back", type="primary"):
         reset_exam()
         st.session_state.pop("result", None)
         st.rerun()
@@ -246,6 +222,44 @@ def whole_number(value: Any, fallback: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def reset_topic_selection() -> None:
+    st.session_state.pop("practice_topic", None)
+
+
+def reset_unit_and_topic_selection() -> None:
+    st.session_state.pop("practice_unit", None)
+    st.session_state.pop("practice_topic", None)
+
+
+def generate_full_practice_test(model: dict[str, Any], level: str, student_name: str, temperature: float) -> tuple[list[dict[str, Any]], str]:
+    """Build the 200-question mock from catalog topics in small model requests."""
+    questions: list[dict[str, Any]] = []
+    source_names: set[str] = set()
+    chunk_size = 20
+    for subject, subject_count in FULL_TEST_COUNTS.items():
+        topic_pairs = [
+            (unit, topic)
+            for unit in resolve_units(CURRICULUM, subject)
+            for topic in resolve_curriculum_topics(CURRICULUM, subject, unit)
+        ]
+        if not topic_pairs:
+            raise RuntimeError(f"No topics are configured for {subject} in curriculum.json.")
+        remaining = subject_count
+        topic_index = 0
+        while remaining:
+            unit, topic = topic_pairs[topic_index % len(topic_pairs)]
+            batch_count = min(chunk_size, remaining)
+            batch, source = generate_questions_from_backend(
+                model, subject, unit, topic, level, batch_count,
+                student_name=student_name, temperature=temperature,
+            )
+            questions.extend({**question, "subject": subject, "unit": unit, "topic": topic, "level": level} for question in batch)
+            source_names.add(source)
+            remaining -= batch_count
+            topic_index += 1
+    return questions, ", ".join(sorted(source_names))
 
 
 def show_setup() -> None:
@@ -296,54 +310,22 @@ def show_setup() -> None:
         selected_student_id = selected_student['student_id']
 
         default_name = selected_student['student_name']
-        default_grade = selected_student['grade']
-        default_country = selected_student['country']
-        default_state = selected_student['school_state']
-        default_district = selected_student['school_district']
 
         st.markdown("---")
     else:
         default_name = ""
-        default_grade = DEFAULTS["grade"]
-        default_country = DEFAULTS["country"]
-        default_state = DEFAULTS["state"]
-        default_district = DEFAULTS["school_district"]
 
-    st.markdown('<div class="hero"><div class="eyebrow">Small steps, sharp thinking</div><h1>Your next best answer starts here.</h1><p>Build confidence with a focused, grade-aware quiz. Your progress is saved automatically so you can review it later.</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="hero"><div class="eyebrow">Small steps, sharp thinking</div><h1>Your next best answer starts here.</h1><p>Build confidence with focused practice. Your progress is saved automatically so you can review it later.</p></div>', unsafe_allow_html=True)
     st.write("")
-    country = st.selectbox("Country", COUNTRIES, index=option_index(COUNTRIES, default_country))
-    country_states = LOCATIONS.get(country, {})
-    if country_states:
-        state_names = list(country_states.keys())
-        state_options = [STATE_PLACEHOLDER] + state_names
-        fallback_state = "North Carolina" if "North Carolina" in state_names else (state_names[0] if state_names else "")
-        school_state = st.selectbox("State", state_options, index=option_index(state_options, default_state, fallback=option_index(state_options, fallback_state)))
-    else:
-        school_state = ""
-
-    districts = country_states.get(school_state, []) if school_state and school_state != STATE_PLACEHOLDER else []
-    if country_states and districts:
-        district_options = [DISTRICT_PLACEHOLDER] + districts
-        school_district = st.selectbox("School District", district_options, index=option_index(district_options, default_district, fallback=1 if districts else 0))
-    elif country_states and school_state and school_state != STATE_PLACEHOLDER:
-        district_options = [DISTRICT_PLACEHOLDER]
-        school_district = st.selectbox("School District", district_options, index=0)
-    else:
-        school_district = ""
-
-    grade = st.selectbox("Grade", GRADE_OPTIONS, index=option_index(GRADE_OPTIONS, default_grade))
-    subject_options = resolve_subjects(TOPICS, grade, school_district)
-    subject = st.selectbox("Subject", subject_options, index=option_index(subject_options, DEFAULTS["subject"]))
-    topic_options = resolve_topics(TOPICS, subject, grade, school_district)
-    if topic_options:
-        topic = st.selectbox("Topic", topic_options, index=option_index(topic_options, DEFAULTS.get("topic")), key="topic_select")
-        source_label = describe_topic_source(TOPICS, subject, grade, school_district)
-        st.caption(f"Topics for {source_label} from config/topics.json." if source_label else "Topics from config/topics.json.")
-    else:
-        topic = st.text_input("Topic", placeholder="e.g. World War II or Photography", key="topic_custom")
-    topic_value = (topic or "").strip()
-    include_images = st.toggle("Include visual questions", value=bool(DEFAULTS["include_images"]), help="Adds visuals to about 30% of applicable questions.")
+    subject_options = list(CURRICULUM)
+    subject = st.selectbox("Subject", subject_options, index=option_index(subject_options, DEFAULTS.get("subject", "Mathematics")), key="practice_subject", on_change=reset_unit_and_topic_selection)
+    unit_options = resolve_units(CURRICULUM, subject)
+    unit = st.selectbox("Unit", unit_options, index=option_index(unit_options, DEFAULTS.get("unit", "")), key="practice_unit", on_change=reset_topic_selection)
+    topic_options = resolve_curriculum_topics(CURRICULUM, subject, unit)
+    topic = st.selectbox("Topic", topic_options, index=option_index(topic_options, DEFAULTS.get("topic", "")), key="practice_topic")
+    level = st.selectbox("Level", LEVEL_OPTIONS, index=option_index(LEVEL_OPTIONS, DEFAULTS.get("level", "Medium")), key="practice_level")
     practice_mode = st.toggle("Practice mode", value=bool(DEFAULTS["practice_mode"]), help="Shows the correct answer after each question and moves forward only.")
+    full_practice_test = st.toggle("Full practice test · 200 questions · 3 hours", value=False, help="Temporarily disabled.", disabled=True)
     with st.form("exam_setup"):
         first, second = st.columns(2)
         if students:
@@ -351,35 +333,49 @@ def show_setup() -> None:
             st.markdown(f"**Student:** {default_name}")
         else:
             name = first.text_input("Student name", value=default_name, placeholder="e.g. Alex Morgan")
-        count = first.selectbox("Number of questions", QUESTION_COUNTS, index=option_index(QUESTION_COUNTS, whole_number(DEFAULTS["question_count"], QUESTION_COUNTS[0])))
-        minutes = second.number_input("Time limit (minutes)", min_value=1, max_value=180, value=min(180, max(1, whole_number(DEFAULTS["time_limit"], 10))), step=1)
-        submitted = st.form_submit_button("Start exam", use_container_width=True)
+        if full_practice_test:
+            first.markdown(f"**Questions:** {FULL_TEST_TOTAL}")
+            second.markdown(f"**Time limit:** {FULL_TEST_MINUTES // 60} hours")
+        else:
+            count = first.selectbox("Number of questions", QUESTION_COUNTS, index=option_index(QUESTION_COUNTS, whole_number(DEFAULTS["question_count"], QUESTION_COUNTS[0])))
+            minutes = second.number_input("Time limit (minutes)", min_value=1, max_value=180, value=min(180, max(1, whole_number(DEFAULTS["time_limit"], 10))), step=1)
+        submitted = st.form_submit_button("Start practice test" if full_practice_test else "Start exam", use_container_width=True)
     if submitted:
         if not str(name).strip():
             st.error("Please enter a student name to begin.")
             return
-        if country_states:
-            if school_state == STATE_PLACEHOLDER:
-                st.error("Please select a state to begin.")
-                return
-            if not districts:
-                st.error("No district catalog entries are available for this state yet.")
-                return
-            if school_district == DISTRICT_PLACEHOLDER:
-                st.error("Please select a school district to begin.")
-                return
-        if not topic_value:
-            st.error("Please enter a topic for the custom subject." if subject == "Others" else "Please select a topic to begin.")
+        if not subject or not unit or not topic:
+            st.error("Please select a subject, unit, and topic to begin.")
             return
         with st.spinner("Preparing your questions..."):
             try:
-                questions, source = generate_questions_from_backend(selected_model, subject, grade, count, school_state, school_district, topic_value, str(name).strip(), temperature, include_images, country=country)
+                if full_practice_test:
+                    questions, source = generate_full_practice_test(selected_model, level, str(name).strip(), temperature)
+                    exam_subject = "Full Practice Test"
+                    exam_unit = "Multiple units"
+                    exam_topic = "Mathematics, Physics, Mechanical Engineering"
+                    question_count = FULL_TEST_TOTAL
+                    time_limit = FULL_TEST_MINUTES
+                else:
+                    questions, source = generate_questions_from_backend(
+                        selected_model, subject, unit, topic, level, count,
+                        student_name=str(name).strip(), temperature=temperature,
+                    )
+                    exam_subject = subject
+                    exam_unit = unit
+                    exam_topic = topic
+                    question_count = count
+                    time_limit = int(minutes)
             except RuntimeError as error:
                 st.error(str(error))
                 return
-        questions = attach_visuals(questions, subject, topic_value, include_images)
-        question_set_id = save_question_set(str(name).strip(), grade, subject, topic_value, questions)
-        st.session_state.exam = {"student_name": str(name).strip(), "student_id": selected_student_id, "grade": grade, "country": country, "school_state": school_state, "school_district": school_district, "subject": subject, "topic": topic_value, "include_images": include_images, "practice_mode": practice_mode, "question_set_id": question_set_id, "time_limit": int(minutes), "questions": questions, "start_time": datetime.now(timezone.utc).isoformat(), "deadline": time.time() + int(minutes) * 60, "source": source}
+        for question in questions:
+            question.setdefault("subject", subject)
+            question.setdefault("unit", unit)
+            question.setdefault("topic", topic)
+            question.setdefault("level", level)
+        question_set_id = save_question_set(str(name).strip(), exam_subject, exam_unit, exam_topic, level, questions)
+        st.session_state.exam = {"student_name": str(name).strip(), "student_id": selected_student_id, "subject": exam_subject, "unit": exam_unit, "topic": exam_topic, "level": level, "practice_mode": practice_mode, "question_set_id": question_set_id, "time_limit": time_limit, "questions": questions, "start_time": datetime.now(timezone.utc).isoformat(), "deadline": time.time() + time_limit * 60, "source": source}
         st.session_state.answers = {}
         st.session_state.question_times = {}
         st.session_state.question_started_at = None
@@ -413,15 +409,13 @@ def show_exam() -> None:
     question = exam["questions"][current]
     minutes, seconds = divmod(seconds_left, 60)
     top_left, top_right = st.columns([3, 1])
-    exam_details = " - ".join(escape(str(value)) for value in (exam["student_name"], exam["grade"], exam["subject"], exam["topic"]) if value)
+    exam_details = " - ".join(escape(str(value)) for value in (exam["student_name"], exam["subject"], exam["unit"], exam["topic"], exam["level"]) if value)
     top_left.markdown(f'<div class="brand"><div class="brand-mark">study<span>-</span>sprint</div><div class="pill">{exam_details}</div></div>', unsafe_allow_html=True)
     with top_right:
         render_clock()
         st.markdown(f'<div class="timer">{minutes:02d}:{seconds:02d}</div><div class="timer-label">remaining</div>', unsafe_allow_html=True)
     st.progress((current + 1) / len(exam["questions"]))
     st.markdown(f'<div class="question-panel"><div class="question-index">Question {current + 1} of {len(exam["questions"])}</div><div class="question-text">{question["question"]}</div>', unsafe_allow_html=True)
-    if question.get("image_url"):
-        st.image(question["image_url"], caption=question.get("image_alt", "Question visual"), use_container_width=True)
     previous_answer = st.session_state.answers.get(current)
     options = question["options"]
     selected = st.radio("Choose one answer", options, index=options.index(previous_answer) if previous_answer in options else None, key=f"answer_{current}", label_visibility="collapsed")
@@ -488,7 +482,11 @@ if not configured_models:
 selected_model_name = st.sidebar.selectbox("LLM model", [model["name"] for model in configured_models], index=0, help="Models are configured in config/models.json.")
 selected_model = configured_models[[model["name"] for model in configured_models].index(selected_model_name)]
 temperature = st.sidebar.slider("Temperature", min_value=0.0, max_value=1.0, value=0.3, step=0.1, help="Lower values are more consistent; higher values create more variety.")
-storage.ensure_schema()
+try:
+    storage.ensure_schema()
+except RuntimeError as error:
+    st.error(f"Database connection failed: {error}")
+    st.stop()
 inject_styles(theme)
 
 if not is_parent_authenticated():
